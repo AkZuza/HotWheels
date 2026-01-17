@@ -100,8 +100,8 @@ class MapCreator:
         
         # View properties
         self.zoom = 1.0
-        self.min_zoom = 0.001
-        self.max_zoom = 20.0
+        self.min_zoom = 0.1
+        self.max_zoom = 10.0
         self.offset_x = 0
         self.offset_y = 0
         
@@ -211,7 +211,6 @@ class MapCreator:
         # Function type buttons
         buttons.append({'type': 'label', 'text': 'Function Type:', 'y': y_offset})
         y_offset += 25
-        
         func_types = [
             (FuncID.EMPTY, 'Empty'),
             (FuncID.WALKABLE, 'Walkable'),
@@ -233,11 +232,9 @@ class MapCreator:
             })
             y_offset += 35 + 5
         
-        y_offset += 25  # Increased spacing before Settings section
-        
         # Text input sections
         buttons.append({'type': 'label', 'text': 'Settings:', 'y': y_offset})
-        y_offset += 35  # Increased from 25 to 35
+        y_offset += 45  # Increased from 25 to 35
         
         # Department ID textbox
         buttons.append({
@@ -247,7 +244,7 @@ class MapCreator:
             'rect': pygame.Rect(10, y_offset, self.toolbar_width - 20, 30),
             'y': y_offset
         })
-        y_offset += 55  # Increased from 50 to 55
+        y_offset += 65  # Increased from 50 to 55
         
         # Destinations textbox (for teleport connections)
         buttons.append({
@@ -299,7 +296,20 @@ class MapCreator:
                 )
                 self.color_array[y, x] = self.COLORS[self.current_func_id]
             self.canvas_dirty = True
-    
+
+    def draw_area(self, x, y, width, height):
+        if 0 <= x < self.map_width and 0 <= y < self.map_height and 0 < x + width <= self.map_width and 0 < y + height <= self.map_height:
+            for i in range(x, width):
+                for j in range(y, height):
+                    self.map_data[j][i] = MapPixel(
+                        cost = self.current_cost,
+                        dept_id = self.current_dept_id,
+                        floor=self.current_floor,
+                        func_id=self.current_func_id,
+                        identifier=self.current_destinations.copy()
+                    )
+        self.canvas_dirty = True
+
     def draw_line_pixels(self, x0, y0, x1, y1):
         """Draw a line of pixels using Bresenham's algorithm"""
         pixels = []
@@ -401,15 +411,15 @@ class MapCreator:
             
             self.last_draw_pos = (mx, my)
         
-        elif self.current_tool in ['rect', 'filled_rect', 'circle', 'filled_circle', 'line']:
+        elif self.current_tool in ['rect', 'filled_rect', 'circle', 'filled_circle', 'line', 'door', 'ramp', 'elevator']:
             # Shape drawing - store preview
             if self.shape_start:
                 sx, sy = self.shape_start
                 
                 if self.current_tool == 'line':
                     self.temp_shape_pixels = self.draw_line_pixels(sx, sy, mx, my)
-                elif self.current_tool in ['rect', 'filled_rect']:
-                    filled = self.current_tool == 'filled_rect'
+                elif self.current_tool in ['rect', 'filled_rect', 'door', 'ramp', 'elevator']:
+                    filled = self.current_tool in ['filled_rect', 'door', 'ramp', 'elevator']
                     self.temp_shape_pixels = self.draw_rect_pixels(sx, sy, mx, my, filled)
                 elif self.current_tool in ['circle', 'filled_circle']:
                     filled = self.current_tool == 'filled_circle'
@@ -446,14 +456,15 @@ class MapCreator:
                 if mouse_pos[0] < self.canvas_width:
                     old_zoom = self.zoom
                     if event.y > 0:
-                        self.zoom = min(self.zoom * 1.1, self.max_zoom)
+                        self.zoom = min(self.zoom * 1.05, self.max_zoom)
                     else:
-                        self.zoom = max(self.zoom / 1.1, self.min_zoom)
-                    
+                        self.zoom = max(self.zoom / 1.05, self.min_zoom)
                     # Adjust offset to zoom toward mouse
+                    """
                     wx, wy = self.screen_to_world(mouse_pos[0], mouse_pos[1])
                     self.offset_x = mouse_pos[0] - wx * self.zoom
                     self.offset_y = mouse_pos[1] - wy * self.zoom
+                    """
                     self.canvas_dirty = True
             
             elif event.type == pygame.MOUSEBUTTONDOWN:
@@ -467,6 +478,13 @@ class MapCreator:
                             if button['rect'].collidepoint(mouse_pos[0] - self.canvas_width, mouse_pos[1]):
                                 if button['type'] == 'tool':
                                     self.current_tool = button['id']
+                                    if self.current_tool == 'door':
+                                        self.current_func_id = FuncID.DOOR
+                                    elif self.current_tool == 'ramp':
+                                        self.current_func_id = FuncID.RAMP
+                                    elif self.current_tool == 'elevator':
+                                        self.current_func_id = FuncID.RAMP
+
                                     self.active_textbox = None  # Deactivate textbox
                                 elif button['type'] == 'func':
                                     self.current_func_id = button['id']
@@ -484,7 +502,7 @@ class MapCreator:
                     self.active_textbox = None  # Deactivate textbox when clicking canvas
                     
                     if event.button == 1:  # Left click
-                        if self.current_tool in ['rect', 'filled_rect', 'circle', 'filled_circle', 'line']:
+                        if self.current_tool in ['rect', 'filled_rect', 'circle', 'filled_circle', 'line', 'door', 'ramp', 'elevator']:
                             map_pos = self.screen_to_map(mouse_pos[0], mouse_pos[1])
                             if map_pos:
                                 self.shape_start = map_pos
@@ -498,7 +516,7 @@ class MapCreator:
             
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button == 1:
-                    if self.current_tool in ['rect', 'filled_rect', 'circle', 'filled_circle', 'line']:
+                    if self.current_tool in ['rect', 'filled_rect', 'circle', 'filled_circle', 'line', 'door', 'ramp', 'elevator']:
                         self.finalize_shape()
                     self.is_drawing = False
                     self.last_draw_pos = None
@@ -602,15 +620,13 @@ class MapCreator:
         visible_area = (min_x, min_y, max_x, max_y)
         
         # Only redraw if canvas is dirty or view changed
-        if self.canvas_dirty or visible_area != self.last_visible_area:
-            # Fill background
+        if self.canvas_dirty:
             self.canvas_surface.fill(self.COLORS['background'])
             
             pixel_size = max(1, int(self.zoom))
             visible_pixels = (max_x - min_x) * (max_y - min_y)
             
-            # Choose rendering method based on zoom and pixel count
-            if visible_pixels > 100000 and pixel_size <= 2:
+            if visible_pixels > 100000000 and pixel_size <= 2:
                 # Ultra-optimized for very large visible areas and low zoom
                 # Use pygame.surfarray for direct pixel access
                 try:
