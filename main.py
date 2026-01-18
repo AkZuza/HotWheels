@@ -8,11 +8,7 @@ import sys
 from map_creator import MapCreator, MapPixel, FuncID
 from nav_utils import (
     NavigationGraph,
-    navigate_multi_map,
-    get_accessible_destinations,
-    validate_map_connections
 )
-
 
 def create_sample_maps(maps_dir='maps'):
     """Create sample maps for demonstration"""

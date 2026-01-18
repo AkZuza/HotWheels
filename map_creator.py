@@ -191,7 +191,7 @@ class MapCreator:
             ('filled_rect', 'Filled Rect'),
             # ('circle', 'Circle'),
             # ('filled_circle', 'Filled Circle'),
-            # ('line', 'Line'),
+            ('line', 'Line'),
             ('door', 'Door'),
             ('ramp', 'Ramp'),
             ('elevator', 'elevator')

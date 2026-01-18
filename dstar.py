@@ -3,6 +3,7 @@ import math
 
 INF = float("inf")
 
+# 8-neighborhood moves (dx, dy, base_cost)
 MOVES = [
     (1, 0, 1.0), (0, 1, 1.0), (-1, 0, 1.0), (0, -1, 1.0),
     (1, 1, 1.41421356237), (-1, 1, 1.41421356237),
@@ -12,13 +13,17 @@ MOVES = [
 
 class DStarLite:
     """
-    Correct D* Lite using grid[y, x] with shape (H, W).
-    grid[y, x] = cost to enter cell (x,y)
-    blocked => INF
+    D* Lite over a 2D cost grid.
+
+    Conventions:
+    - grid is numpy array shape (H, W)
+    - access as grid[y, x]
+    - grid[y, x] is cost to ENTER cell (x,y)
+    - obstacles => INF
     """
 
     def __init__(self, start, goal, grid):
-        self.grid = grid  # [H,W]
+        self.grid = grid  # [H, W]
         self.start = start
         self.goal = goal
 
@@ -27,7 +32,7 @@ class DStarLite:
 
         self.g = {}
         self.rhs = {}
-        self.U = []
+        self.U = []  # heap of (key, node)
 
         H, W = self.grid.shape
         for y in range(H):
@@ -49,6 +54,7 @@ class DStarLite:
         return (c > 0.0) and (not math.isinf(c))
 
     def h(self, a, b):
+        # Manhattan heuristic is stable
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
     def key(self, s):
@@ -56,6 +62,7 @@ class DStarLite:
         return (m + self.h(self.start, s) + self.km, m)
 
     def cost(self, a, b):
+        """Move cost a->b = base * enter_cost(b)."""
         bx, by = b
         cell_cost = float(self.grid[by, bx])
         if cell_cost <= 0.0 or math.isinf(cell_cost):
@@ -81,6 +88,7 @@ class DStarLite:
                 yield ns
 
     def predecessors(self, s):
+        # symmetric moves
         return self.successors(s)
 
     def update_vertex(self, u):
@@ -92,6 +100,7 @@ class DStarLite:
                     best = cand
             self.rhs[u] = best
 
+        # lazy duplicates in heap
         heapq.heappush(self.U, (self.key(u), u))
 
     def _top_key(self):
@@ -118,6 +127,7 @@ class DStarLite:
 
             if self.g[u] > self.rhs[u]:
                 self.g[u] = self.rhs[u]
+                # update PREDECESSORS
                 for p in self.predecessors(u):
                     self.update_vertex(p)
             else:
@@ -149,7 +159,8 @@ class DStarLite:
         self.last = new_start
         self.start = new_start
 
-    def next(self, compute_budget=300):
+    def next(self, compute_budget=800):
+        # time-sliced compute
         self.compute(max_steps=compute_budget)
 
         best, best_val = None, INF

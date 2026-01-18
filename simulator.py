@@ -28,12 +28,11 @@ class Simulator:
         # State
         self.cur_map = None
         self.map_data = None
-        self.features = [] 
+        self.features = []
         self.wheelchair = Wheelchair(0, 0)
-        self.wc_map_id = None 
+        self.wc_map_id = None
         self.traced_path = []
 
-        
         # Assets
         self.assets = {}
         self._load_assets()
@@ -41,11 +40,11 @@ class Simulator:
         # View
         self.zoom = 1.0
         self.off_x, self.off_y = 0, 0
-        
+
         # Navigation
         self.anim_frame = 0
         self.input_mode = None
-        self.start_pt = None 
+        self.start_pt = None
         self.goal_pt = None
         self.path = []
         self.sequence = []
@@ -53,14 +52,17 @@ class Simulator:
         self.is_moving = False
         self.path_idx = 0
 
+        self.local_planner = None
+        self.seq_idx = 0
+
         # Load initial map
         self.load_map(list(self.nav_graph.maps.keys())[0])
 
     def _load_assets(self):
         # Tries to load icons, fails gracefully if missing
         icon_files = {
-            'lift': 'lift_icon.png', 
-            'door': 'door_icon.png', 
+            'lift': 'lift_icon.png',
+            'door': 'door_icon.png',
             'stairs': 'stairs_icon.png'
         }
         for key, filename in icon_files.items():
@@ -72,7 +74,6 @@ class Simulator:
                 except Exception as e:
                     print(f"Warning: Could not load {filename}: {e}")
             else:
-                # print(f"Note: {filename} not found in assets/ folder.")
                 pass
 
     def on_map_select(self, map_id):
@@ -84,19 +85,19 @@ class Simulator:
         info = self.nav_graph.maps[map_id]
         self.map_data = info.map_data
         self.mw, self.mh = info.width, info.height
-        
+
         # Smart Auto-Fit
         view_w, view_h = self.ui.rect_map.width, self.ui.rect_map.height
         base_w, base_h = self.mw * 30, self.mh * 30
-        
+
         scale_x = (view_w - 100) / base_w
         scale_y = (view_h - 100) / base_h
         self.zoom = min(scale_x, scale_y)
-        
+
         final_w, final_h = base_w * self.zoom, base_h * self.zoom
         self.off_x = (view_w - final_w) / 2
         self.off_y = (view_h - final_h) / 2
-        
+
         self._scan_features()
 
     def _scan_features(self):
@@ -108,15 +109,15 @@ class Simulator:
         for y in range(rows):
             for x in range(cols):
                 if (x,y) in visited: continue
-                
-                # CRASH FIX: Ensure pixel is treated as object, not tuple
+
+                # Ensure pixel is treated as object, not tuple
                 pixel = self.map_data[y][x]
-                if isinstance(pixel, tuple): 
+                if isinstance(pixel, tuple):
                     pixel = MapPixel.from_tuple(pixel)
-                    self.map_data[y][x] = pixel # Update in place
-                
+                    self.map_data[y][x] = pixel
+
                 pid = pixel.func_id
-                
+
                 if pid in [FuncID.ELEVATOR, FuncID.DOOR, FuncID.STAIR]:
                     cluster = []
                     q = [(x,y)]
@@ -133,15 +134,14 @@ class Simulator:
                             if 0<=nx<cols and 0<=ny<rows:
                                 if (nx,ny) not in visited:
                                     np_pix = self.map_data[ny][nx]
-                                    # Handle tuple check again for neighbors
                                     if isinstance(np_pix, tuple):
                                         np_pix = MapPixel.from_tuple(np_pix)
                                         self.map_data[ny][nx] = np_pix
-                                    
+
                                     if np_pix.func_id == pid:
                                         visited.add((nx,ny))
                                         q.append((nx,ny))
-                    
+
                     xs, ys = [p[0] for p in cluster], [p[1] for p in cluster]
                     self.features.append({
                         'type': pid,
@@ -168,7 +168,10 @@ class Simulator:
         self.full_res = None
         self.is_moving = False
         self.path_idx = 0
-        self.wc_map_id = None 
+        self.wc_map_id = None
+        self.local_planner = None
+        self.sequence = []
+        self.seq_idx = 0
 
     def start_nav(self):
         if not self.start_pt or not self.goal_pt:
@@ -200,13 +203,12 @@ class Simulator:
             cp['goal']
         )
 
-
-        self.wheelchair = Wheelchair(*self.start_pt[1])
+        # FIX: must use checkpoint start, not original start_pt
+        self.wheelchair = Wheelchair(*cp['start'])
         self.wc_map_id = self.cur_map
-        self.traced_path = [self.start_pt[1]]
+        self.traced_path = [cp['start']]
         self.is_moving = True
         return "Navigating..."
-
 
     def add_obstacle(self, map_coords):
         cx, cy = map_coords
@@ -222,24 +224,20 @@ class Simulator:
                             p = MapPixel.from_tuple(p)
                             self.map_data[y][x] = p
 
-                        # ONLY modify ground truth
                         p.func_id = FuncID.OBSTACLE
                         p.cost = 999
 
         return "Dynamic obstacle added"
-
-
 
     def update(self):
         try:
             self.anim_frame = (self.anim_frame + 1) % 60
 
             if self.is_moving and self.local_planner:
-
                 visible = self.wheelchair.visible_cells(self.map_data, radius=5)
                 self.local_planner.sense_and_update(visible)
 
-                nxt = self.local_planner.step(compute_budget=1000)
+                nxt = self.local_planner.step(compute_budget=1200)
 
                 if nxt is None:
                     self.no_move_frames = getattr(self, "no_move_frames", 0) + 1
@@ -255,7 +253,6 @@ class Simulator:
 
                 # reached local goal (teleport or final)
                 if nxt == self.local_planner.goal:
-
                     self.seq_idx += 1
 
                     if self.seq_idx >= len(self.sequence):
@@ -268,7 +265,7 @@ class Simulator:
                     self.load_map(self.cur_map)
 
                     self.traced_path = []
-                
+
                     cp = self.full_res['checkpoints'][self.cur_map]
                     self.local_planner = DynamicLocalPlanner(
                         self.nav_graph.maps[self.cur_map],
@@ -283,24 +280,21 @@ class Simulator:
             traceback.print_exc()
             self.is_moving = False
 
-
-
-
     def draw_marker(self, map_coords, color, label):
         sx, sy = self.map_to_screen(map_coords[0]+0.5, map_coords[1]+0.5)
         offset = math.sin(self.anim_frame * 0.1) * 5
-        
+
         shadow_scale = 1.0 - (offset + 5) / 40.0
-        pygame.draw.ellipse(self.screen, (0,0,0,50), 
+        pygame.draw.ellipse(self.screen, (0,0,0,50),
                           (sx - 10*shadow_scale, sy - 5*shadow_scale, 20*shadow_scale, 10*shadow_scale))
-        
+
         float_y = sy - 30 - offset
-        
+
         pts = [(sx, float_y + 10), (sx - 10, float_y - 5), (sx + 10, float_y - 5)]
         pygame.draw.polygon(self.screen, color, pts)
         pygame.draw.circle(self.screen, color, (sx, float_y - 5), 16)
         pygame.draw.circle(self.screen, (255,255,255), (sx, float_y - 5), 6)
-        
+
         if label:
             font = pygame.font.SysFont("Segoe UI", 12, bold=True)
             txt = font.render(label, True, (255,255,255))
@@ -313,15 +307,18 @@ class Simulator:
         ts = 30 * self.zoom
         self.screen.fill(THEME['void'])
         self.screen.set_clip(self.ui.rect_map)
-        
+
         # --- Map Floor ---
         map_rect = pygame.Rect(self.off_x, self.off_y, self.mw * ts, self.mh * ts)
         pygame.draw.rect(self.screen, (0,0,0), (map_rect.x+10, map_rect.y+10, map_rect.w, map_rect.h))
         pygame.draw.rect(self.screen, THEME['map_bg'], map_rect)
         pygame.draw.rect(self.screen, THEME['map_border'], map_rect, 2)
 
-        # --- Walls / Obstacle BLOBS ---
-        wall_size = max(ts, 2)
+        # --- Tile Renderer (EMPTY=WHITE, WALKABLE=GREEN, OBSTACLE=BLACK) ---
+        COL_EMPTY = (255, 255, 255)
+        COL_WALK = (0, 200, 0)
+        COL_OBS = (0, 0, 0)
+
         start_x = max(0, int(-self.off_x / ts))
         end_x = min(self.mw, int((self.ui.rect_map.width - self.off_x) / ts) + 1)
         start_y = max(0, int(-self.off_y / ts))
@@ -330,31 +327,32 @@ class Simulator:
         for y in range(start_y, end_y):
             for x in range(start_x, end_x):
                 px = self.map_data[y][x]
+                rx, ry = self.map_to_screen(x, y)
+                rect = pygame.Rect(int(rx), int(ry), int(ts) + 1, int(ts) + 1)
+
                 if px.func_id == FuncID.OBSTACLE or px.cost > 50:
-                    rx, ry = self.map_to_screen(x, y)
-                    pygame.draw.circle(
-                        self.screen, THEME['danger'],
-                        (int(rx+ts/2), int(ry+ts/2)), int(ts/2)
-                    )
+                    pygame.draw.rect(self.screen, COL_OBS, rect)
+                elif px.func_id == FuncID.WALKABLE:
+                    pygame.draw.rect(self.screen, COL_WALK, rect)
+                else:
+                    pygame.draw.rect(self.screen, COL_EMPTY, rect)
 
         # --- Traced Path ---
         if len(self.traced_path) > 1 and self.wc_map_id == self.cur_map:
             pts = [self.map_to_screen(p[0]+0.5, p[1]+0.5) for p in self.traced_path]
             pygame.draw.lines(self.screen, (40, 200, 255), False, pts, max(6, int(8*self.zoom)))
 
-
         # --- Icons (RESTORED) ---
         font_label = pygame.font.SysFont("Segoe UI", 12)
         for f in self.features:
             cx, cy = self.map_to_screen(f['pos'][0]+0.5, f['pos'][1]+0.5)
-            sz = int(max(36, ts * 1.4))   # bigger, clean
+            sz = int(max(36, ts * 1.4))
 
-            
             icn = None
             if f['type'] == FuncID.ELEVATOR: icn = self.assets.get('lift')
             elif f['type'] == FuncID.DOOR: icn = self.assets.get('door')
             elif f['type'] == FuncID.STAIR: icn = self.assets.get('stairs')
-            
+
             if icn:
                 i_rect = icn.get_rect()
                 scale = min(sz / i_rect.width, sz / i_rect.height)
@@ -377,7 +375,6 @@ class Simulator:
         if self.goal_pt and self.goal_pt[0] == self.cur_map:
             self.draw_marker(self.goal_pt[1], THEME['danger'], "GOAL")
 
-
         # --- Wheelchair ---
         if self.wc_map_id == self.cur_map:
             self.wheelchair.draw(self.screen, ts, self.off_x, self.off_y)
@@ -395,12 +392,11 @@ class Simulator:
 
         self.screen.set_clip(None)
 
-
     def run(self):
         clock = pygame.time.Clock()
         status = "Select Map & Set Points"
         running = True
-        
+
         while running:
             route_str = ""
             if self.sequence:
@@ -408,14 +404,14 @@ class Simulator:
 
             for e in pygame.event.get():
                 if e.type == pygame.QUIT: running = False
-                
+
                 act = self.ui.handle_input(e)
                 if act:
-                    if act == "START": 
+                    if act == "START":
                         self.input_mode = "START"
-                        self.reset_path() 
+                        self.reset_path()
                         status = "Click Map for START"
-                    elif act == "GOAL": 
+                    elif act == "GOAL":
                         self.input_mode = "GOAL"
                         self.reset_path()
                         status = "Click Map for GOAL"
@@ -442,7 +438,6 @@ class Simulator:
                         self.wc_map_id = None
                         status = f"Viewing {self.cur_map}"
 
-                
                 if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and not act:
                     if self.ui.rect_map.collidepoint(e.pos) and self.input_mode:
                         mp = self.screen_to_map(*e.pos)
@@ -467,7 +462,7 @@ class Simulator:
             self.update()
             self.draw_scene()
             self.ui.draw(self.screen, status, self.is_moving, route_str)
-            
+
             if self.input_mode:
                 msg = f"PLACING {self.input_mode}"
                 f = pygame.font.SysFont("Segoe UI", 20, bold=True)
@@ -488,3 +483,4 @@ if __name__ == "__main__":
         import traceback
         traceback.print_exc()
         input("CRASHED. Press Enter to exit...")
+
