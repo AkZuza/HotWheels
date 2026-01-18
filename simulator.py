@@ -1,618 +1,486 @@
 """
-Navigation Simulator - Visual wheelchair navigation with pygame
-Shows real-time movement across multiple maps with status bar
+Navigation Simulator - Fixed Icons & Crash Protection
 """
 
 import pygame
+import math
+import numpy as np
 import os
-from typing import Tuple, Optional, List
-from map_creator import MapCreator, MapPixel, FuncID
-from nav_utils import NavigationGraph, navigate_multi_map, find_path_in_map
+from nav_utils import DynamicLocalPlanner, NavigationGraph, navigate_multi_map
+from map_creator import MapPixel, FuncID
+from wheelchair import Wheelchair
+from ui_manager import UIManager, THEME
 
-
-class NavigationSimulator:
-    """Visual simulator for wheelchair navigation"""
-
-    # Colors
-    COLORS = {
-        'background': (240, 240, 240),
-        'grid': (200, 200, 200),
-        'ui_bg': (50, 50, 50),
-        'ui_text': (255, 255, 255),
-        'wheelchair': (255, 0, 0),
-        'path': (100, 200, 255),
-        'start': (0, 255, 0),
-        'goal': (255, 215, 0),
-        FuncID.EMPTY: (255, 255, 255),
-        FuncID.WALKABLE: (200, 255, 200),
-        FuncID.RAMP: (150, 200, 255),
-        FuncID.DOOR: (255, 200, 150),
-        FuncID.ELEVATOR: (200, 150, 255),
-        FuncID.STAIR: (255, 150, 150),
-        FuncID.OBSTACLE: (100, 100, 100),
-    }
-
-    def __init__(self, nav_graph: NavigationGraph, window_width=1200, window_height=800):
+class Simulator:
+    def __init__(self, maps_dir='maps'):
         pygame.init()
+        self.nav_graph = NavigationGraph()
+        self.nav_graph.load_maps(maps_dir)
+        if not self.nav_graph.maps: raise Exception("No maps found!")
 
-        self.nav_graph = nav_graph
-        self.window_width = window_width
-        self.window_height = window_height
+        self.w, self.h = 1280, 720
+        self.screen = pygame.display.set_mode((self.w, self.h), pygame.RESIZABLE)
+        pygame.display.set_caption("Wheelchair Nav System v5.1 (Fixed)")
 
-        # Window setup
-        self.screen = pygame.display.set_mode((window_width, window_height))
-        pygame.display.set_caption("Wheelchair Navigation Simulator")
+        self.ui = UIManager(self.w, self.h, self.on_map_select)
+        self.ui.update_maps(list(self.nav_graph.maps.keys()))
 
-        # UI dimensions
-        self.statusbar_height = 80
-        self.canvas_height = window_height - self.statusbar_height
+        # State
+        self.cur_map = None
+        self.map_data = None
+        self.features = [] 
+        self.wheelchair = Wheelchair(0, 0)
+        self.wc_map_id = None 
+        self.traced_path = []
 
-        # Current state
-        self.current_map = None
-        self.current_map_data = None
-        self.map_width = 0
-        self.map_height = 0
+        
+        # Assets
+        self.assets = {}
+        self._load_assets()
 
-        # Navigation state
-        self.wheelchair_pos = None
-        self.goal_pos = None
-        self.current_path = []
-        self.path_index = 0
-        self.map_sequence = []
-        self.current_map_index = 0
-        self.full_navigation = None
-        self.teleport_transitions = []  # Store teleport entry/exit points
-
-        # Animation
-        self.animation_speed = 5  # frames per step
-        self.animation_counter = 0
-        self.is_moving = False
-        self.total_steps = 0
-        self.total_cost = 0
-
-        # View properties
+        # View
         self.zoom = 1.0
-        self.min_zoom = 0.5
-        self.max_zoom = 10.0
-        self.offset_x = 0
-        self.offset_y = 0
+        self.off_x, self.off_y = 0, 0
+        
+        # Navigation
+        self.anim_frame = 0
+        self.input_mode = None
+        self.start_pt = None 
+        self.goal_pt = None
+        self.path = []
+        self.sequence = []
+        self.full_res = None
+        self.is_moving = False
+        self.path_idx = 0
 
-        # Color array cache
-        self.color_array = None
+        # Load initial map
+        self.load_map(list(self.nav_graph.maps.keys())[0])
 
-        # Fonts
-        self.font_small = pygame.font.Font(None, 20)
-        self.font_medium = pygame.font.Font(None, 24)
-        self.font_large = pygame.font.Font(None, 32)
+    def _load_assets(self):
+        # Tries to load icons, fails gracefully if missing
+        icon_files = {
+            'lift': 'lift_icon.png', 
+            'door': 'door_icon.png', 
+            'stairs': 'stairs_icon.png'
+        }
+        for key, filename in icon_files.items():
+            path = os.path.join("assets", filename)
+            if os.path.exists(path):
+                try:
+                    img = pygame.image.load(path).convert_alpha()
+                    self.assets[key] = img
+                except Exception as e:
+                    print(f"Warning: Could not load {filename}: {e}")
+            else:
+                # print(f"Note: {filename} not found in assets/ folder.")
+                pass
 
-        # Clock
-        self.clock = pygame.time.Clock()
-        self.running = True
+    def on_map_select(self, map_id):
+        self.load_map(map_id)
 
-        # Input mode
-        self.input_mode = None  # 'start', 'goal', 'switch_map', or None
-        self.pending_start = None
-        self.pending_goal = None
-        self.pending_start_map = None
-        self.pending_goal_map = None
-        self.map_input_buffer = ""  # For map switching input
+    def load_map(self, map_id):
+        if map_id not in self.nav_graph.maps: return
+        self.cur_map = map_id
+        info = self.nav_graph.maps[map_id]
+        self.map_data = info.map_data
+        self.mw, self.mh = info.width, info.height
+        
+        # Smart Auto-Fit
+        view_w, view_h = self.ui.rect_map.width, self.ui.rect_map.height
+        base_w, base_h = self.mw * 30, self.mh * 30
+        
+        scale_x = (view_w - 100) / base_w
+        scale_y = (view_h - 100) / base_h
+        self.zoom = min(scale_x, scale_y)
+        
+        final_w, final_h = base_w * self.zoom, base_h * self.zoom
+        self.off_x = (view_w - final_w) / 2
+        self.off_y = (view_h - final_h) / 2
+        
+        self._scan_features()
 
-    def load_map(self, map_id: str):
-        """Load a specific map for display"""
-        if map_id not in self.nav_graph.maps:
-            print(f"Error: Map {map_id} not found")
-            return False
+    def _scan_features(self):
+        self.features = []
+        if self.map_data is None: return
+        visited = set()
+        rows, cols = len(self.map_data), len(self.map_data[0])
 
-        map_info = self.nav_graph.maps[map_id]
-        self.current_map = map_id
-        self.current_map_data = map_info.map_data
-        self.map_width = map_info.width
-        self.map_height = map_info.height
+        for y in range(rows):
+            for x in range(cols):
+                if (x,y) in visited: continue
+                
+                # CRASH FIX: Ensure pixel is treated as object, not tuple
+                pixel = self.map_data[y][x]
+                if isinstance(pixel, tuple): 
+                    pixel = MapPixel.from_tuple(pixel)
+                    self.map_data[y][x] = pixel # Update in place
+                
+                pid = pixel.func_id
+                
+                if pid in [FuncID.ELEVATOR, FuncID.DOOR, FuncID.STAIR]:
+                    cluster = []
+                    q = [(x,y)]
+                    visited.add((x,y))
+                    label = ""
+                    if pixel.identifier:
+                        label = str(pixel.identifier[0]).replace("_", " ").title()
 
-        # Build color array
-        self.color_array = self._build_color_array()
+                    while q:
+                        cx, cy = q.pop(0)
+                        cluster.append((cx,cy))
+                        for dx,dy in [(1,0),(-1,0),(0,1),(0,-1)]:
+                            nx, ny = cx+dx, cy+dy
+                            if 0<=nx<cols and 0<=ny<rows:
+                                if (nx,ny) not in visited:
+                                    np_pix = self.map_data[ny][nx]
+                                    # Handle tuple check again for neighbors
+                                    if isinstance(np_pix, tuple):
+                                        np_pix = MapPixel.from_tuple(np_pix)
+                                        self.map_data[ny][nx] = np_pix
+                                    
+                                    if np_pix.func_id == pid:
+                                        visited.add((nx,ny))
+                                        q.append((nx,ny))
+                    
+                    xs, ys = [p[0] for p in cluster], [p[1] for p in cluster]
+                    self.features.append({
+                        'type': pid,
+                        'pos': ((min(xs)+max(xs))/2, (min(ys)+max(ys))/2),
+                        'size': max(len(set(xs)), len(set(ys))),
+                        'label': label
+                    })
 
-        # Center view
-        self.offset_x = (self.window_width - self.map_width * self.zoom) / 2
-        self.offset_y = (self.canvas_height - self.map_height * self.zoom) / 2
-
-        pygame.display.set_caption(f"Navigation Simulator - {map_id}")
-
-        return True
-
-    def _build_color_array(self):
-        """Build color array for fast rendering"""
-        color_array = []
-        for y in range(self.map_height):
-            row = []
-            for x in range(self.map_width):
-                pixel = self.current_map_data[y][x]
-                color = self.COLORS.get(pixel.func_id, self.COLORS[FuncID.EMPTY])
-                row.append(color)
-            color_array.append(row)
-        return color_array
-
-    def world_to_screen(self, wx, wy):
-        """Convert world coordinates to screen coordinates"""
-        sx = (wx * self.zoom) + self.offset_x
-        sy = (wy * self.zoom) + self.offset_y
-        return int(sx), int(sy)
-
-    def screen_to_world(self, sx, sy):
-        """Convert screen coordinates to world coordinates"""
-        wx = (sx - self.offset_x) / self.zoom
-        wy = (sy - self.offset_y) / self.zoom
-        return int(wx), int(wy)
+    def map_to_screen(self, mx, my):
+        ts = 30 * self.zoom
+        return (self.off_x + mx * ts, self.off_y + my * ts)
 
     def screen_to_map(self, sx, sy):
-        """Convert screen coordinates to map coordinates"""
-        wx, wy = self.screen_to_world(sx, sy)
-        if 0 <= wx < self.map_width and 0 <= wy < self.map_height:
-            return wx, wy
+        ts = 30 * self.zoom
+        if ts <= 0.1: return None
+        mx = int((sx - self.off_x) / ts)
+        my = int((sy - self.off_y) / ts)
+        if 0 <= mx < self.mw and 0 <= my < self.mh: return mx, my
         return None
 
-    def start_navigation(self, start_map: str, start_pos: Tuple[int, int],
-                         end_map: str, end_pos: Tuple[int, int]):
-        """Start navigation from start to end"""
-        print(f"\nStarting navigation: {start_map}{start_pos} → {end_map}{end_pos}")
+    def reset_path(self):
+        self.path = []
+        self.traced_path=[]
+        self.full_res = None
+        self.is_moving = False
+        self.path_idx = 0
+        self.wc_map_id = None 
 
-        # Get full navigation plan
-        self.full_navigation = navigate_multi_map(
+    def start_nav(self):
+        if not self.start_pt or not self.goal_pt:
+            return "Set Start & Goal First!"
+
+        res = navigate_multi_map(
             self.nav_graph,
-            start_map, start_pos,
-            end_map, end_pos
+            self.start_pt[0], self.start_pt[1],
+            self.goal_pt[0], self.goal_pt[1]
         )
 
-        if not self.full_navigation['success']:
-            print("Navigation failed!")
-            for instruction in self.full_navigation['instructions']:
-                print(instruction)
-            return False
+        if not res['success'] or not res['map_sequence']:
+            self.is_moving = False
+            return "Path Blocked!"
 
-        print("\nNavigation plan:")
-        for instruction in self.full_navigation['instructions']:
-            print(instruction)
+        self.full_res = res
+        self.sequence = res['map_sequence']
 
-        # Set up state
-        self.map_sequence = self.full_navigation['map_sequence']
-        self.current_map_index = 0
-        self.wheelchair_pos = start_pos
-        self.goal_pos = end_pos
-        self.total_steps = 0
-        self.total_cost = 0
+        self.cur_map = self.sequence[0]
+        self.load_map(self.cur_map)
 
-        # Build teleport transition data
-        self._build_teleport_transitions()
+        self.seq_idx = 0
+        cp = self.full_res['checkpoints'][self.sequence[0]]
 
-        # Load first map
-        self.load_map(self.map_sequence[0])
+        self.local_planner = DynamicLocalPlanner(
+            self.nav_graph.maps[self.sequence[0]],
+            cp['start'],
+            cp['goal']
+        )
 
-        # Get path for first map
-        self._load_current_map_path()
 
+        self.wheelchair = Wheelchair(*self.start_pt[1])
+        self.wc_map_id = self.cur_map
+        self.traced_path = [self.start_pt[1]]
         self.is_moving = True
-        return True
+        return "Navigating..."
 
-    def _build_teleport_transitions(self):
-        """Build data structure for teleport entry/exit points"""
-        self.teleport_transitions = []
 
-        for i in range(len(self.map_sequence) - 1):
-            current_map_id = self.map_sequence[i]
-            next_map_id = self.map_sequence[i + 1]
+    def add_obstacle(self, map_coords):
+        cx, cy = map_coords
+        R = 4
 
-            # Get exit point from current map (last point in path)
-            current_path = self.full_navigation['paths'][current_map_id]
-            exit_point = current_path[-1]
+        for dy in range(-R, R+1):
+            for dx in range(-R, R+1):
+                x, y = cx+dx, cy+dy
+                if 0 <= x < self.mw and 0 <= y < self.mh:
+                    if math.sqrt(dx*dx + dy*dy) <= R:
+                        p = self.map_data[y][x]
+                        if isinstance(p, tuple):
+                            p = MapPixel.from_tuple(p)
+                            self.map_data[y][x] = p
 
-            # Find teleport type at exit
-            current_map = self.nav_graph.maps[current_map_id]
-            exit_pixel = current_map.map_data[exit_point[1]][exit_point[0]]
+                        # ONLY modify ground truth
+                        p.func_id = FuncID.OBSTACLE
+                        p.cost = 999
 
-            # Entry point in next map = first position in next map path
-            next_path = self.full_navigation['paths'][next_map_id]
-            entry_point = next_path[0]
+        return "Dynamic obstacle added"
 
-            self.teleport_transitions.append({
-                'from_map': current_map_id,
-                'to_map': next_map_id,
-                'exit_point': exit_point,
-                'entry_point': entry_point,
-                'teleport_type': FuncID(exit_pixel.func_id).name
-            })
 
-            print(f"Teleport {i + 1}: {current_map_id}{exit_point} → {next_map_id}{entry_point} via {FuncID(exit_pixel.func_id).name}")
-
-    def _load_current_map_path(self):
-        """Load path for current map in sequence"""
-        current_map = self.map_sequence[self.current_map_index]
-
-        if current_map in self.full_navigation['paths']:
-            self.current_path = self.full_navigation['paths'][current_map]
-            self.path_index = 0
-            print(f"Loaded path for {current_map}: {len(self.current_path)} steps")
-        else:
-            print(f"Error: No path for {current_map}")
-            self.current_path = []
 
     def update(self):
-        """Update navigation state"""
-        if not self.is_moving or not self.current_path:
-            return
+        try:
+            self.anim_frame = (self.anim_frame + 1) % 60
 
-        self.animation_counter += 1
+            if self.is_moving and self.local_planner:
 
-        if self.animation_counter >= self.animation_speed:
-            self.animation_counter = 0
+                visible = self.wheelchair.visible_cells(self.map_data, radius=5)
+                self.local_planner.sense_and_update(visible)
 
-            # Move to next position
-            if self.path_index < len(self.current_path):
-                self.wheelchair_pos = self.current_path[self.path_index]
+                nxt = self.local_planner.step()
 
-                # Calculate cost
-                x, y = self.wheelchair_pos
-                pixel = self.current_map_data[y][x]
-                self.total_cost += pixel.cost
-                self.total_steps += 1
+                # NO PATH → STOP SAFELY
+                if nxt is None:
+                    self.is_moving = False
+                    print("D* Lite: Path blocked, stopping safely.")
+                    return
 
-                self.path_index += 1
+                self.wheelchair.update_pos(nxt)
+                self.traced_path.append(nxt)
 
-                # End of current path
-                if self.path_index >= len(self.current_path):
-                    if self.current_map_index < len(self.map_sequence) - 1:
-                        transition = self.teleport_transitions[self.current_map_index]
+                # reached local goal (teleport or final)
+                if nxt == self.local_planner.goal:
 
-                        print(f"\nReached teleport in {transition['from_map']} at {transition['exit_point']}")
-                        print(f"Using {transition['teleport_type']} to teleport to {transition['to_map']}")
+                    self.seq_idx += 1
 
-                        # Move to next map
-                        self.current_map_index += 1
-                        next_map = self.map_sequence[self.current_map_index]
-
-                        print(f"Entering {next_map} at {transition['entry_point']}")
-
-                        # Load next map + next path
-                        self.load_map(next_map)
-                        self._load_current_map_path()
-
-                        if self.current_path:
-                            expected_entry = transition['entry_point']
-                            path_start = self.current_path[0]
-
-                            # ✅ Always start exactly at the teleport entry point
-                            self.wheelchair_pos = expected_entry
-
-                            # If the path doesn't start from expected_entry, stitch a small connector path
-                            if expected_entry != path_start:
-                                print("  ⚠ Next-map path does not start at teleport entry point.")
-                                print("  → Stitching connector path entry → path_start")
-
-                                connector = find_path_in_map(
-                                    self.current_map_data,
-                                    expected_entry,
-                                    path_start,
-                                    self.map_width,
-                                    self.map_height
-                                )
-
-                                if connector:
-                                    # avoid duplicating path_start
-                                    if connector[-1] == path_start:
-                                        connector = connector[:-1]
-                                    self.current_path = connector + self.current_path
-                                    print(f"  ✓ Added {len(connector)} connector steps")
-                                else:
-                                    print("  ✗ Failed to build connector path; forcing path_start")
-                                    self.wheelchair_pos = path_start
-
-                            # We are at index 0 now
-                            self.path_index = 1
-                        else:
-                            print("Error: No path in new map!")
-
-                    else:
-                        print(f"\n{'=' * 60}")
-                        print(f"✓ DESTINATION REACHED!")
-                        print(f"{'=' * 60}")
-                        print(f"Total steps: {self.total_steps}")
-                        print(f"Total cost: {self.total_cost}")
-                        print(f"Maps traversed: {len(self.map_sequence)}")
-                        print(f"Route: {' → '.join(self.map_sequence)}")
-                        print(f"{'=' * 60}")
+                    if self.seq_idx >= len(self.sequence):
                         self.is_moving = False
+                        print("Navigation complete.")
+                        return
 
-    def handle_events(self):
-        """Handle pygame events"""
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                self.running = False
+                    # switch map
+                    self.cur_map = self.sequence[self.seq_idx]
+                    self.load_map(self.cur_map)
 
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE:
-                    self.is_moving = not self.is_moving
-                    print("Paused" if not self.is_moving else "Resumed")
+                    self.traced_path = []
+                
+                    cp = self.full_res['checkpoints'][self.cur_map]
+                    self.local_planner = DynamicLocalPlanner(
+                        self.nav_graph.maps[self.cur_map],
+                        cp['start'],
+                        cp['goal']
+                    )
 
-                elif event.key == pygame.K_r:
-                    if self.full_navigation:
-                        start_map = self.map_sequence[0]
-                        start_pos = self.full_navigation['paths'][start_map][0]
-                        end_map = self.map_sequence[-1]
-                        end_pos = self.full_navigation['paths'][end_map][-1]
-                        self.start_navigation(start_map, start_pos, end_map, end_pos)
+                    self.wheelchair = Wheelchair(*cp['start'])
+                    self.wc_map_id = self.cur_map
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            self.is_moving = False
 
-                elif event.key == pygame.K_EQUALS or event.key == pygame.K_PLUS:
-                    self.animation_speed = max(1, self.animation_speed - 1)
-                    print(f"Speed: {self.animation_speed} frames/step")
 
-                elif event.key == pygame.K_MINUS:
-                    self.animation_speed = min(30, self.animation_speed + 1)
-                    print(f"Speed: {self.animation_speed} frames/step")
 
-                elif event.key == pygame.K_s:
-                    print("\nClick on map to set START position")
-                    self.input_mode = 'start'
 
-                elif event.key == pygame.K_g:
-                    print("\nClick on map to set GOAL position")
-                    self.input_mode = 'goal'
+    def draw_marker(self, map_coords, color, label):
+        sx, sy = self.map_to_screen(map_coords[0]+0.5, map_coords[1]+0.5)
+        offset = math.sin(self.anim_frame * 0.1) * 5
+        
+        shadow_scale = 1.0 - (offset + 5) / 40.0
+        pygame.draw.ellipse(self.screen, (0,0,0,50), 
+                          (sx - 10*shadow_scale, sy - 5*shadow_scale, 20*shadow_scale, 10*shadow_scale))
+        
+        float_y = sy - 30 - offset
+        
+        pts = [(sx, float_y + 10), (sx - 10, float_y - 5), (sx + 10, float_y - 5)]
+        pygame.draw.polygon(self.screen, color, pts)
+        pygame.draw.circle(self.screen, color, (sx, float_y - 5), 16)
+        pygame.draw.circle(self.screen, (255,255,255), (sx, float_y - 5), 6)
+        
+        if label:
+            font = pygame.font.SysFont("Segoe UI", 12, bold=True)
+            txt = font.render(label, True, (255,255,255))
+            bg_rect = pygame.Rect(0, 0, txt.get_width() + 12, txt.get_height() + 12)
+            bg_rect.midbottom = (sx, float_y - 25)
+            pygame.draw.rect(self.screen, THEME['surface'], bg_rect, border_radius=4)
+            self.screen.blit(txt, txt.get_rect(center=bg_rect.center))
 
-                elif event.key == pygame.K_n:
-                    if self.pending_start and self.pending_goal:
-                        self.start_navigation(
-                            self.pending_start_map, self.pending_start,
-                            self.pending_goal_map, self.pending_goal
-                        )
-                    else:
-                        print("\nSet start (S) and goal (G) positions first, then press N")
+    def draw_scene(self):
+        ts = 30 * self.zoom
+        self.screen.fill(THEME['void'])
+        self.screen.set_clip(self.ui.rect_map)
+        
+        # --- Map Floor ---
+        map_rect = pygame.Rect(self.off_x, self.off_y, self.mw * ts, self.mh * ts)
+        pygame.draw.rect(self.screen, (0,0,0), (map_rect.x+10, map_rect.y+10, map_rect.w, map_rect.h))
+        pygame.draw.rect(self.screen, THEME['map_bg'], map_rect)
+        pygame.draw.rect(self.screen, THEME['map_border'], map_rect, 2)
 
-                elif event.key == pygame.K_m:
-                    print("\nAvailable maps:")
-                    map_list = sorted(self.nav_graph.maps.keys())
-                    for i, map_id in enumerate(map_list):
-                        print(f"  {i + 1}. {map_id}")
-                    self.input_mode = 'switch_map'
-                    print("Type number and press ENTER to switch, or ESC to cancel")
+        # --- Walls / Obstacle BLOBS ---
+        wall_size = max(ts, 2)
+        start_x = max(0, int(-self.off_x / ts))
+        end_x = min(self.mw, int((self.ui.rect_map.width - self.off_x) / ts) + 1)
+        start_y = max(0, int(-self.off_y / ts))
+        end_y = min(self.mh, int((self.ui.rect_map.height - self.off_y) / ts) + 1)
 
-                elif event.key == pygame.K_ESCAPE:
-                    self.input_mode = None
-                    print("\nInput cancelled")
+        for y in range(start_y, end_y):
+            for x in range(start_x, end_x):
+                px = self.map_data[y][x]
+                if px.func_id == FuncID.OBSTACLE or px.cost > 50:
+                    rx, ry = self.map_to_screen(x, y)
+                    pygame.draw.circle(
+                        self.screen, THEME['danger'],
+                        (int(rx+ts/2), int(ry+ts/2)), int(ts/2)
+                    )
 
-                elif self.input_mode == 'switch_map':
-                    if event.key == pygame.K_RETURN:
-                        if hasattr(self, 'map_input_buffer') and self.map_input_buffer:
-                            try:
-                                map_list = sorted(self.nav_graph.maps.keys())
-                                map_idx = int(self.map_input_buffer) - 1
-                                if 0 <= map_idx < len(map_list):
-                                    selected_map = map_list[map_idx]
-                                    self.load_map(selected_map)
-                                    print(f"Switched to {selected_map}")
-                                else:
-                                    print(f"Invalid map number: {self.map_input_buffer}")
-                            except ValueError:
-                                print(f"Invalid input: {self.map_input_buffer}")
-                            self.map_input_buffer = ""
-                            self.input_mode = None
-                    elif event.key == pygame.K_BACKSPACE:
-                        if hasattr(self, 'map_input_buffer'):
-                            self.map_input_buffer = self.map_input_buffer[:-1]
-                    elif event.unicode.isdigit():
-                        if not hasattr(self, 'map_input_buffer'):
-                            self.map_input_buffer = ""
-                        self.map_input_buffer += event.unicode
-                        print(f"Input: {self.map_input_buffer}")
+        # --- Traced Path ---
+        if len(self.traced_path) > 1 and self.wc_map_id == self.cur_map:
+            pts = [self.map_to_screen(p[0]+0.5, p[1]+0.5) for p in self.traced_path]
+            pygame.draw.lines(self.screen, (40, 200, 255), False, pts, max(6, int(8*self.zoom)))
 
-            elif event.type == pygame.MOUSEBUTTONDOWN:
-                mouse_pos = pygame.mouse.get_pos()
 
-                if event.button == 1:  # Left click
-                    if self.input_mode:
-                        map_pos = self.screen_to_map(mouse_pos[0], mouse_pos[1])
-                        if map_pos:
-                            if self.input_mode == 'start':
-                                self.pending_start = map_pos
-                                self.pending_start_map = self.current_map
-                                print(f"Start set to {self.current_map}:{map_pos}")
-                                self.input_mode = None
-                            elif self.input_mode == 'goal':
-                                self.pending_goal = map_pos
-                                self.pending_goal_map = self.current_map
-                                print(f"Goal set to {self.current_map}:{map_pos}")
-                                self.input_mode = None
+        # --- Icons (RESTORED) ---
+        font_label = pygame.font.SysFont("Segoe UI", 12)
+        for f in self.features:
+            cx, cy = self.map_to_screen(f['pos'][0]+0.5, f['pos'][1]+0.5)
+            sz = int(max(36, ts * 1.4))   # bigger, clean
 
-                            if self.pending_start and self.pending_goal:
-                                print("\nPress N to start navigation")
+            
+            icn = None
+            if f['type'] == FuncID.ELEVATOR: icn = self.assets.get('lift')
+            elif f['type'] == FuncID.DOOR: icn = self.assets.get('door')
+            elif f['type'] == FuncID.STAIR: icn = self.assets.get('stairs')
+            
+            if icn:
+                i_rect = icn.get_rect()
+                scale = min(sz / i_rect.width, sz / i_rect.height)
+                new_size = (int(i_rect.width * scale), int(i_rect.height * scale))
+                s_icn = pygame.transform.smoothscale(icn, new_size)
+                self.screen.blit(s_icn, s_icn.get_rect(center=(cx, cy)))
 
-            elif event.type == pygame.MOUSEWHEEL:
-                mouse_pos = pygame.mouse.get_pos()
-                if mouse_pos[1] < self.canvas_height:
-                    if event.y > 0:
-                        self.zoom = min(self.zoom * 1.1, self.max_zoom)
-                    else:
-                        self.zoom = max(self.zoom / 1.1, self.min_zoom)
+            if f['label']:
+                lbl_surf = font_label.render(f['label'], True, THEME['text_dark'])
+                bg_rect = lbl_surf.get_rect(midtop=(cx, cy + sz//2 + 4))
+                bg_rect.inflate_ip(8, 4)
+                pygame.draw.rect(self.screen, (255,255,255, 220), bg_rect, border_radius=4)
+                pygame.draw.rect(self.screen, (200,200,200), bg_rect, 1, border_radius=4)
+                self.screen.blit(lbl_surf, bg_rect.move(4,2))
 
-                    wx, wy = self.screen_to_world(mouse_pos[0], mouse_pos[1])
-                    self.offset_x = mouse_pos[0] - wx * self.zoom
-                    self.offset_y = mouse_pos[1] - wy * self.zoom
+        # --- Markers ---
+        if self.start_pt and self.start_pt[0] == self.cur_map:
+            self.draw_marker(self.start_pt[1], THEME['success'], "START")
 
-    def render_map(self):
-        """Render the current map"""
-        self.screen.fill(self.COLORS['background'])
+        if self.goal_pt and self.goal_pt[0] == self.cur_map:
+            self.draw_marker(self.goal_pt[1], THEME['danger'], "GOAL")
 
-        if not self.current_map_data.all():
-            return
 
-        top_left = self.screen_to_world(0, 0)
-        bottom_right = self.screen_to_world(self.window_width, self.canvas_height)
+        # --- Wheelchair ---
+        if self.wc_map_id == self.cur_map:
+            self.wheelchair.draw(self.screen, ts, self.off_x, self.off_y)
 
-        min_x = max(0, int(top_left[0]))
-        min_y = max(0, int(top_left[1]))
-        max_x = min(self.map_width, int(bottom_right[0]) + 2)
-        max_y = min(self.map_height, int(bottom_right[1]) + 2)
+        # --- Placement Preview ---
+        if self.input_mode:
+            mpos = pygame.mouse.get_pos()
+            coord = self.screen_to_map(*mpos)
+            if coord:
+                lbl, col = "", (255,255,255)
+                if self.input_mode=="START": lbl, col = "START?", THEME['success']
+                elif self.input_mode=="GOAL": lbl, col = "GOAL?", THEME['danger']
+                elif self.input_mode=="ADD_OBSTACLE": lbl, col = "BLOCK?", THEME['warning']
+                self.draw_marker(coord, col, lbl)
 
-        pixel_size = max(1, int(self.zoom))
+        self.screen.set_clip(None)
 
-        for y in range(min_y, max_y):
-            for x in range(min_x, max_x):
-                color = self.color_array[y][x]
-                sx, sy = self.world_to_screen(x, y)
-                pygame.draw.rect(self.screen, color, (sx, sy, pixel_size, pixel_size))
-
-        # Draw path
-        if self.current_path:
-            for i, (px, py) in enumerate(self.current_path):
-                if i < self.path_index:
-                    color = (180, 220, 255)
-                else:
-                    color = self.COLORS['path']
-
-                sx, sy = self.world_to_screen(px, py)
-                pygame.draw.circle(
-                    self.screen, color,
-                    (sx + pixel_size // 2, sy + pixel_size // 2),
-                    max(2, pixel_size // 3)
-                )
-
-        # Draw start position (if pending)
-        if self.pending_start and self.pending_start_map == self.current_map:
-            sx, sy = self.world_to_screen(self.pending_start[0], self.pending_start[1])
-            pygame.draw.circle(
-                self.screen, self.COLORS['start'],
-                (sx + pixel_size // 2, sy + pixel_size // 2),
-                max(5, pixel_size // 2)
-            )
-
-        # Draw goal position (if pending)
-        if self.pending_goal and self.pending_goal_map == self.current_map:
-            sx, sy = self.world_to_screen(self.pending_goal[0], self.pending_goal[1])
-            pygame.draw.circle(
-                self.screen, self.COLORS['goal'],
-                (sx + pixel_size // 2, sy + pixel_size // 2),
-                max(5, pixel_size // 2)
-            )
-
-        # Draw wheelchair
-        if self.wheelchair_pos:
-            wx, wy = self.wheelchair_pos
-            sx, sy = self.world_to_screen(wx, wy)
-            radius = max(6, pixel_size // 2 + 2)
-            pygame.draw.circle(
-                self.screen, self.COLORS['wheelchair'],
-                (sx + pixel_size // 2, sy + pixel_size // 2),
-                radius
-            )
-            pygame.draw.circle(
-                self.screen, (255, 255, 255),
-                (sx + pixel_size // 2, sy + pixel_size // 2),
-                radius, 2
-            )
-
-    def render_status_bar(self):
-        """Render status bar with information"""
-        status_rect = pygame.Rect(0, self.canvas_height,
-                                  self.window_width, self.statusbar_height)
-        pygame.draw.rect(self.screen, self.COLORS['ui_bg'], status_rect)
-
-        y_offset = self.canvas_height + 10
-
-        if self.current_map and self.wheelchair_pos:
-            text = f"Map: {self.current_map} | Position: {self.wheelchair_pos}"
-            surf = self.font_medium.render(text, True, self.COLORS['ui_text'])
-            self.screen.blit(surf, (10, y_offset))
-            y_offset += 25
-
-        if self.map_sequence:
-            progress_text = f"Route: {' → '.join(self.map_sequence)}"
-            surf = self.font_small.render(progress_text, True, self.COLORS['ui_text'])
-            self.screen.blit(surf, (10, y_offset))
-            y_offset += 20
-
-            if self.current_path:
-                progress = f"Map {self.current_map_index + 1}/{len(self.map_sequence)} | " \
-                           f"Steps: {self.path_index}/{len(self.current_path)} | " \
-                           f"Total: {self.total_steps} steps, Cost: {self.total_cost}"
-                surf = self.font_small.render(progress, True, self.COLORS['ui_text'])
-                self.screen.blit(surf, (10, y_offset))
-                y_offset += 20
-
-        controls = "SPACE: Pause/Resume | +/-: Speed | R: Reset | S: Set Start | G: Set Goal | N: Navigate | M: Switch Map"
-        surf = self.font_small.render(controls, True, (150, 150, 150))
-        self.screen.blit(surf, (10, self.window_height - 20))
-
-        status = "MOVING" if self.is_moving else "PAUSED"
-        if not self.current_path:
-            status = "IDLE"
-
-        status_surf = self.font_large.render(
-            status, True,
-            (0, 255, 0) if self.is_moving else (255, 100, 100)
-        )
-        status_rect = status_surf.get_rect(right=self.window_width - 20, top=self.canvas_height + 10)
-        self.screen.blit(status_surf, status_rect)
 
     def run(self):
-        """Main simulation loop"""
-        while self.running:
-            self.handle_events()
-            self.update()
-            self.render_map()
-            self.render_status_bar()
-            pygame.display.flip()
-            self.clock.tick(60)
+        clock = pygame.time.Clock()
+        status = "Select Map & Set Points"
+        running = True
+        
+        while running:
+            route_str = ""
+            if self.sequence:
+                route_str = " -> ".join([s.replace("_", " ").title() for s in self.sequence])
 
+            for e in pygame.event.get():
+                if e.type == pygame.QUIT: running = False
+                
+                act = self.ui.handle_input(e)
+                if act:
+                    if act == "START": 
+                        self.input_mode = "START"
+                        self.reset_path() 
+                        status = "Click Map for START"
+                    elif act == "GOAL": 
+                        self.input_mode = "GOAL"
+                        self.reset_path()
+                        status = "Click Map for GOAL"
+                    elif act == "ADD_OBSTACLE":
+                        self.input_mode = "ADD_OBSTACLE"
+                        status = "Click to Add Obstacle"
+                    elif act == "NAV": status = self.start_nav()
+                    elif act == "RESET":
+                        self.start_pt = None
+                        self.goal_pt = None
+                        self.traced_path = []
+                        self.sequence = []
+                        self.local_planner = None
+                        self.is_moving = False
+                        self.wc_map_id = None
+                        status = "Reset Complete."
+                    elif act == "ZOOM_IN": self.zoom *= 1.2
+                    elif act == "ZOOM_OUT": self.zoom /= 1.2
+                    elif act == "MAP_CHANGED":
+                        self.traced_path = []
+                        self.sequence = []
+                        self.local_planner = None
+                        self.is_moving = False
+                        self.wc_map_id = None
+                        status = f"Viewing {self.cur_map}"
+
+                
+                if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and not act:
+                    if self.ui.rect_map.collidepoint(e.pos) and self.input_mode:
+                        mp = self.screen_to_map(*e.pos)
+                        if mp:
+                            if self.input_mode == "START":
+                                self.start_pt = (self.cur_map, mp)
+                                status = "Start Set."
+                                self.input_mode = None
+                            elif self.input_mode == "GOAL":
+                                self.goal_pt = (self.cur_map, mp)
+                                status = "Goal Set."
+                                self.input_mode = None
+                            elif self.input_mode == "ADD_OBSTACLE":
+                                status = self.add_obstacle(mp)
+                                # Keep input mode active for multiple obstacles
+
+                if e.type == pygame.MOUSEMOTION and e.buttons[0] and not self.input_mode:
+                    if self.ui.rect_map.collidepoint(e.pos):
+                        self.off_x += e.rel[0]
+                        self.off_y += e.rel[1]
+
+            self.update()
+            self.draw_scene()
+            self.ui.draw(self.screen, status, self.is_moving, route_str)
+            
+            if self.input_mode:
+                msg = f"PLACING {self.input_mode}"
+                f = pygame.font.SysFont("Segoe UI", 20, bold=True)
+                s = f.render(msg, True, (255,255,255))
+                bg = pygame.Rect(0,0, s.get_width()+40, 40)
+                bg.center = (self.ui.rect_map.width//2, 40)
+                pygame.draw.rect(self.screen, (0,0,0,180), bg, border_radius=20)
+                self.screen.blit(s, s.get_rect(center=bg.center))
+
+            pygame.display.flip()
+            clock.tick(60)
         pygame.quit()
 
-
-def run_simulator(maps_dir='maps', start_map=None, start_pos=None,
-                  end_map=None, end_pos=None):
-    """
-    Run the navigation simulator
-    """
-    print("Loading maps...")
-    nav_graph = NavigationGraph()
-    nav_graph.load_maps(maps_dir)
-
-    if not nav_graph.maps:
-        print(f"Error: No maps found in {maps_dir}")
-        return
-
-    print(f"Loaded {len(nav_graph.maps)} maps")
-
-    simulator = NavigationSimulator(nav_graph)
-
-    first_map = start_map if start_map else list(nav_graph.maps.keys())[0]
-    simulator.load_map(first_map)
-
-    if start_map and start_pos and end_map and end_pos:
-        simulator.start_navigation(start_map, start_pos, end_map, end_pos)
-    else:
-        print("\nSimulator started in IDLE mode")
-        print("Press S to set start position")
-        print("Press G to set goal position")
-        print("Press N to start navigation")
-        print("Press M to switch maps")
-
-    simulator.run()
-
-
 if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) > 1:
-        if len(sys.argv) >= 9:
-            run_simulator(
-                maps_dir=sys.argv[1],
-                start_map=sys.argv[2],
-                start_pos=(int(sys.argv[3]), int(sys.argv[4])),
-                end_map=sys.argv[5],
-                end_pos=(int(sys.argv[6]), int(sys.argv[7]))
-            )
-        else:
-            run_simulator(maps_dir=sys.argv[1])
-    else:
-        print("Usage:")
-        print("  python simulator.py [maps_dir]")
-        print("  python simulator.py [maps_dir] [start_map] [start_x] [start_y] [end_map] [end_x] [end_y]")
-        print("\nRunning with default 'maps' directory...")
-        run_simulator('maps')
-
+    try:
+        Simulator().run()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        input("CRASHED. Press Enter to exit...")
