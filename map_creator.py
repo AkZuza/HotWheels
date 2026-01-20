@@ -15,9 +15,9 @@ class FuncID(IntEnum):
     """Functional identifiers for map elements"""
     EMPTY = 0
     WALKABLE = 1
-    RAMP = 2
+    RAMP = 4
     DOOR = 3
-    ELEVATOR = 4
+    ELEVATOR = 2
     STAIR = 5
     OBSTACLE = 6
 
@@ -35,23 +35,16 @@ class MapPixel:
     
     @staticmethod
     def from_tuple(data):
-        """Load MapPixel with backward compatibility"""
-        # Handle old format without identifier (4 elements)
         if len(data) == 4:
             return MapPixel(data[0], data[1], data[2], data[3], [])
         
-        # Handle old format with string identifier (5 elements, last is str)
         if len(data) == 5:
             if isinstance(data[4], str):
-                # Convert old string format to list
-                # Split by comma and strip whitespace
                 destinations = [d.strip() for d in data[4].split(',') if d.strip()]
                 return MapPixel(data[0], data[1], data[2], data[3], destinations)
             elif isinstance(data[4], list):
-                # New format - already a list
                 return MapPixel(data[0], data[1], data[2], data[3], data[4])
         
-        # Fallback
         return MapPixel(data[0], data[1], data[2], data[3], [])
 
 class MapCreator:
@@ -194,7 +187,7 @@ class MapCreator:
             ('line', 'Line'),
             ('door', 'Door'),
             ('ramp', 'Ramp'),
-            ('elevator', 'elevator')
+            ('elevator', 'Elevator')
         ]
         
         buttons.append({'type': 'label', 'text': 'Tools:', 'y': y_offset})
@@ -220,6 +213,7 @@ class MapCreator:
             (FuncID.WALKABLE, 'Walkable'),
             (FuncID.STAIR, 'Stair'),
             (FuncID.OBSTACLE, 'Obstacle'),
+            (FuncID.ELEVATOR, 'Elevator')
         ]
         
         for func_id, func_name in func_types:
@@ -500,7 +494,7 @@ class MapCreator:
                                     elif self.current_tool == 'ramp':
                                         self.current_func_id = FuncID.RAMP
                                     elif self.current_tool == 'elevator':
-                                        self.current_func_id = FuncID.RAMP
+                                        self.current_func_id = FuncID.ELEVATOR
 
                                     self.active_textbox = None  # Deactivate textbox
                                 elif button['type'] == 'func':

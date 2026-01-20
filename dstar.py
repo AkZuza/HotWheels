@@ -39,6 +39,7 @@ class DStarLite:
 
     def traversable(self, s):
         x, y = s
+        if not self.in_bounds(s): return False
         c = float(self.grid[y, x])
         return (c > 0.0) and (not math.isinf(c))
 
@@ -56,6 +57,8 @@ class DStarLite:
 
     def cost(self, a, b):
         """Move cost from a to b."""
+        if not self.in_bounds(b): return INF
+        
         bx, by = b
         cell_cost = float(self.grid[by, bx])
         
@@ -76,6 +79,7 @@ class DStarLite:
             if not self.in_bounds(ns):
                 continue
             
+            # Strict traversability check
             if not self.traversable(ns):
                 continue
             
@@ -90,11 +94,6 @@ class DStarLite:
 
     def update_vertex(self, u):
         """Update vertex and add to priority queue."""
-        # Remove from queue if present
-        if u in self.U_set:
-            self.U_set.discard(u)
-            # Note: We don't actually remove from heap, just mark as stale
-        
         if u != self.goal:
             best = INF
             for s in self.successors(u):
@@ -105,7 +104,10 @@ class DStarLite:
                         best = val
             self.rhs[u] = best
         
-        # Only add to queue if inconsistent
+        # Update queue
+        if u in self.U_set:
+            self.U_set.discard(u)
+        
         g_val = self.g.get(u, INF)
         rhs_val = self.rhs.get(u, INF)
         
@@ -122,18 +124,32 @@ class DStarLite:
             if max_steps and steps >= max_steps:
                 break
             
+            # Check for start consistency (Termination condition)
+            if self.rhs.get(self.start, INF) != INF:
+                # Basic check: if smallest key in queue is >= start key, we are done
+                # But we need to check the TOP of the heap
+                while self.U and self.U[0][1] not in self.U_set:
+                     heapq.heappop(self.U)
+                
+                if not self.U: break
+                
+                k_start = self.key(self.start)
+                k_top = self.U[0][0]
+                
+                start_g = self.g.get(self.start, INF)
+                start_rhs = self.rhs.get(self.start, INF)
+                
+                if k_top >= k_start and abs(start_g - start_rhs) < 1e-5:
+                    break
+
             # Pop from queue
             k_old, u = heapq.heappop(self.U)
-            
-            # Skip stale entries
             if u not in self.U_set:
                 continue
-            
             self.U_set.discard(u)
             
             k_new = self.key(u)
 
-            # Reinsert if key changed
             if k_old < k_new:
                 heapq.heappush(self.U, (k_new, u))
                 self.U_set.add(u)
@@ -142,42 +158,18 @@ class DStarLite:
             g_val = self.g.get(u, INF)
             rhs_val = self.rhs.get(u, INF)
             
-            # Skip if already consistent
-            if abs(g_val - rhs_val) < 1e-5:
-                continue
-
             steps += 1
             
             if g_val > rhs_val:
-                # Overconsistent - make consistent
                 self.g[u] = rhs_val
                 for p in self.predecessors(u):
                     self.update_vertex(p)
             else:
-                # Underconsistent
                 self.g[u] = INF
                 self.update_vertex(u)
                 for p in self.predecessors(u):
                     self.update_vertex(p)
-            
-            # Early termination: if start is consistent and has lower key than top of queue
-            start_g = self.g.get(self.start, INF)
-            start_rhs = self.rhs.get(self.start, INF)
-            
-            if abs(start_g - start_rhs) < 1e-5:
-                # Start is consistent
-                if not self.U or not self.U_set:
-                    break
-                # Check if we can terminate
-                top_key = None
-                for k, v in self.U:
-                    if v in self.U_set:
-                        top_key = k
-                        break
-                
-                if top_key is None or top_key >= self.key(self.start):
-                    break
-
+                    
         return steps
 
     def update_cell_cost(self, cell, new_cost):
@@ -185,7 +177,6 @@ class DStarLite:
         x, y = cell
         self.grid[y, x] = float(new_cost)
         
-        # Update affected vertices
         self.update_vertex(cell)
         for p in self.predecessors(cell):
             self.update_vertex(p)
