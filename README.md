@@ -5,14 +5,8 @@ Navigation system for Wheelchairs in Campus.
 - Navigation between different floors
 
 ## Installation
-```
-``pip install -r requirements.txt ``
+```pip install -r requirements.txt ```
 
 ## Running Simulator 
-``python simualtor.py maps``
-```
-```
-```
-```
-```
-```
+```python simualtor.py maps```
+
