@@ -204,6 +204,7 @@ class Simulator:
             self.nav_graph.maps[self.sequence[0]],
             cp['start'],
             cp['goal'],
+            nav_graph=self.nav_graph,
             initial_visible_cells = initial_visible
         )
 
